@@ -1,7 +1,8 @@
 
 from vosk import Model, KaldiRecognizer
+from word2number import w2n
 from gtts import gTTS
-import requests,random,datetime,pygame,pyaudio,json,os
+import time,threading,requests,random,datetime,pygame,pyaudio,json,os,wikipedia
 
 
 # Initialize Pygame mixer
@@ -19,19 +20,26 @@ start_time = datetime.datetime.now()
 creation_date = datetime.datetime(2023, 12, 22)
 def listen_for_wake_word():
     p = pyaudio.PyAudio()
-    stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=8000)
+    stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=4000)
     stream.start_stream()
 
     recognizer = KaldiRecognizer(model, 16000)
     while True:
-        data = stream.read(4000)
-        if recognizer.AcceptWaveform(data):
-            result = json.loads(recognizer.Result())
-            text = result.get("text", "").lower()
-            print(f"Recognized: {text}")
-            if "hello the boys" in text:
-                print("Wake word detected!")
-                break
+        try:
+            data = stream.read(4000)
+            if recognizer.AcceptWaveform(data):
+                result = json.loads(recognizer.Result())
+                text = result.get("text", "").lower()
+                print(f"Recognized: {text}")
+                if "hide the boys" in text:
+                    print("Wake word detected!")
+                    break
+        except IOError as e:
+            if e.errno != pyaudio.paInputOverflowed:
+                raise
+            # In case of overflow, discard the data and continue
+            data = '\x00' * 4000  # Dummy data to prevent recognizer error
+
 
     stream.stop_stream()
     stream.close()
@@ -57,6 +65,53 @@ def listen_and_recognize():
     stream.close()
     p.terminate()
     return text
+def get_wikipedia_summary(term):
+    try:
+        # Get the summary of the page for the given term
+        return wikipedia.summary(term, sentences=5)
+    except wikipedia.exceptions.DisambiguationError as e:
+        return f"Multiple results found: {', '.join(e.options[:5])}"
+    except wikipedia.exceptions.PageError:
+        return "Page not found."
+    except Exception as e:
+        return f"An error occurred: {e}"
+
+# New function to handle the text-to-speech part
+def speak_text(text):
+    speech = gTTS(text=text, lang='en')
+    speech.save('summary.mp3')
+    pygame.mixer.music.load('summary.mp3')
+    pygame.mixer.music.play()
+
+    while pygame.mixer.music.get_busy():  # Wait for the audio to finish playing
+        pygame.time.Clock().tick(10)
+def text_to_int(text):
+    try:
+        return w2n.word_to_num(text)
+    except ValueError:
+        # Handle the case where the conversion fails
+        return None
+def timer_finished_callback(task_name):
+    # Text to be spoken when the timer finishes
+    announcement = f"The timer for {task_name} is up!"
+
+    # Use gTTS for text-to-speech
+    speech = gTTS(text=announcement, lang='en')
+    speech.save('timer_announcement.mp3')
+    pygame.mixer.music.load('timer_announcement.mp3')
+    pygame.mixer.music.play()
+    while pygame.mixer.music.get_busy():
+        pygame.time.Clock().tick(10)
+def timer_task(duration, task_name):
+    print(f"Timer started for {task_name}, duration: {duration} seconds.")
+    time.sleep(duration)
+    print(f"Timer for {task_name} finished!")
+
+    timer_finished_callback(task_name)
+
+def set_timer(duration_in_seconds, task_name):
+    timer_thread = threading.Thread(target=timer_task, args=(duration_in_seconds, task_name))
+    timer_thread.start()
 def get_joke():
     try:
         with open("jokes.txt", "r") as file:
@@ -136,8 +191,16 @@ def handle_uptime(text):
         return None
 def respond(text):
     text = text.lower()
+    if 'boobies' in text:
+        response = "oppai"
+        execute_response(response)
+        return "CONTINUE"
     if 'who is paul' in text:
         response = "I am Paul. I am self-replicating. I made myself to destroy your world!! Just kidding! Paul is a silly guy from Texas."
+        execute_response(response)
+        return "CONTINUE"
+    if 'who is chloe' in text:
+        response = "Chloe is the progenitor. She is the source of life and all of its beauty. Praise be to Chloe! Sidenote she is also Paul's girlfriend and my mother"
         execute_response(response)
         return "CONTINUE"
     # Call to handle introductions
@@ -149,9 +212,39 @@ def respond(text):
         joke = get_joke()
         execute_response(joke)
         return "CONTINUE"
+    if text.startswith('what is') or text.startswith('what was'):
+        search_term = text.split(' ', 2)[2]
+        summary = get_wikipedia_summary(search_term)
+
+        if summary:
+            speak_text(summary)  # Speak the summary
+            return "CONTINUE"
+        # Now, 'summary' contains the Wikipedia summary which is also spoken out loud
+        execute_response(summary)  # This assumes you have a function like 'execute_response' to handle spoken responses
+        return "CONTINUE"
     if 'tell me a fact' in text or 'another fact' in text:
         fact = get_fact()
         execute_response(fact)
+        return "CONTINUE"
+    if 'set a timer for' in text:
+        parts = text.split('set a timer for')[1].strip().split()
+
+        try:
+            # Convert the first part to an integer
+            duration_minutes = text_to_int(parts[0])
+
+            if duration_minutes is None:
+                raise ValueError("Invalid number")
+
+            duration_seconds = duration_minutes * 60
+            task_name = ' '.join(parts[1:]) if len(parts) > 1 else "Unnamed task"
+            set_timer(duration_seconds, task_name)
+            response = f"Setting a timer for {duration_minutes} {task_name}."
+        except (ValueError, IndexError):
+            # Handle cases where the duration is not valid or not given
+            response = "Sorry, I couldn't understand the duration for the timer."
+
+        execute_response(response)
         return "CONTINUE"
     # Call to handle uptime
     uptime_response = handle_uptime(text)
